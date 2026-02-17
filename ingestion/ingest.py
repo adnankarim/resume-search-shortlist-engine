@@ -127,16 +127,49 @@ def run_ingestion(input_file: str, limit: Optional[int] = None):
     log.info(f"Embedding dimension: {embedding_dim}")
 
     # Read input file
+    # Read input file
     log.info(f"Reading input: {input_file}")
+    
+    raw_data = None
+    try:
+        # Try standard JSON first
+        with open(input_file, "r", encoding="utf-8") as f:
+            raw_data = json.load(f)
+            log.info("Parsed file as standard JSON.")
+    except json.JSONDecodeError:
+        # Fallback to JSONL
+        log.info("File not standard JSON, parsing as JSONL...")
+        raw_data = []
+        with open(input_file, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    try:
+                        raw_data.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        pass
+        log.info(f"Parsed {len(raw_data)} JSONL lines.")
+
+    # Flatten and validate resumes
     resumes = []
-    with open(input_file, "r", encoding="utf-8") as f:
-        for i, line in enumerate(f):
-            if limit and i >= limit:
-                break
-            line = line.strip()
-            if line:
-                resumes.append(json.loads(line))
-    log.info(f"Loaded {len(resumes)} resumes")
+    
+    def extract_resumes(obj):
+        if isinstance(obj, dict):
+            # Check if it looks like a resume (optional heuristic, but safe)
+            # Or just accept it as a resume object.
+            # We'll assume any dict at this level is a resume.
+            resumes.append(obj)
+        elif isinstance(obj, list):
+            for item in obj:
+                extract_resumes(item)
+    
+    extract_resumes(raw_data)
+    log.info(f"Extracted {len(resumes)} resume objects after flattening.")
+
+    # Limit
+    if limit:
+        resumes = resumes[:limit]
+        log.info(f"Limiting to {limit} resumes.")
 
     # Counters
     stats = {
