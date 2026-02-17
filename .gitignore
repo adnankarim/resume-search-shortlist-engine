@@ -1,0 +1,42 @@
+# Environment variables
+.env
+.env.local
+
+# Dependencies
+node_modules/
+venv/
+venv2/
+venv_build/
+__pycache__/
+*.pyc
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+logs/
+*.txt
+
+# OS Files
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# IDEs
+.vscode/
+.idea/
+
+# Build outputs
+dist/
+build/
+cover/
+*.egg-info/
+
+# Project specific
+uploads/
+ml-service/models/
+ingestion/data/
+*.jsonl
+!sample_resume.jsonl
