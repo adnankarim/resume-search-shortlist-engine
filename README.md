@@ -52,6 +52,38 @@ graph TD
 
 The core of the system is a **LangGraph** state machine that orchestrates the search process:
 
+```mermaid
+sequenceDiagram
+    participant User
+    participant Client as React Client
+    participant Server as Node API
+    participant Agents as Python ML Service
+    participant Mongo as MongoDB
+
+    User->>Client: Enters Search Query
+    Client->>Server: POST /sessions (Create)
+    Server-->>Client: Session ID
+    
+    Client->>Agents: SSE Connect (Start Pipeline)
+    activate Agents
+    
+    Agents->>Agents: 🧠 Intent Analysis (GPT-4o)
+    Agents-->>Client: Stream: "Parsing requirements..."
+    
+    Agents->>Mongo: 🔍 Hybrid Retrieval (Vector + Keyword)
+    Mongo-->>Agents: 50+ Candidates
+    Agents-->>Client: Stream: "Found candidates..."
+    
+    Agents->>Agents: ⚖️ Cross-Encoder Reranking
+    Agents-->>Client: Stream: "Refining match quality..."
+    
+    Agents-->>Client: ✅ Final Results (JSON)
+    deactivate Agents
+    
+    Client->>Server: PUT /sessions (Save Results)
+    Client->>User: Displays Results Table
+```
+
 1.  **Stage 1: Intent Analysis** (`jd_agent.py`)
     *   **Model**: OpenAI GPT-4o-mini
     *   **Goal**: Converts natural language into a `MissionSpec` JSON object containing:
@@ -174,4 +206,3 @@ If you need to ingest new resumes:
 
 ---
 
-*Built with ❤️ by the Agentic AI Team.*
