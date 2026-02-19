@@ -28,11 +28,12 @@ A production-grade, agentic RAG (Retrieval-Augmented Generation) platform for in
 ## 🏗️ Architecture
 
 ```mermaid
-graph TD
-    Client[React Client (Vite)] <-->|REST / SSE| Node[Node.js API Gateway]
-    Node <-->|Internal API| Python[Python ML Service (FastAPI)]
+flowchart TD
+    Client["React Client (Vite)"] <-->|REST / SSE| Node["Node.js API Gateway"]
+    Node <-->|Internal API| Python["Python ML Service (FastAPI)"]
     
-    subgraph "Agentic Pipeline (LangGraph)"
+    subgraph Pipeline ["Agentic Pipeline (LangGraph)"]
+        direction TB
         start((Start)) --> Intent[Query Analysis Agent]
         Intent --> Retrieval[Hybrid Retrieval Tool]
         Retrieval --> Rerank[Cross-Encoder Reranker]
@@ -40,9 +41,9 @@ graph TD
         Evidence --> Assembly[Final Assembly]
     end
     
-    Python -->|Orchestrates| Agentic Pipeline
+    Python -->|Orchestrates| Pipeline
     
-    Retrieval <-->|Vector Search| Mongo[MongoDB (Atlas/Local)]
+    Retrieval <-->|Vector Search| Mongo[("MongoDB (Atlas/Local)")]
     Node <-->|Session Store| Mongo
 ```
 
