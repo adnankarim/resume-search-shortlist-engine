@@ -129,13 +129,39 @@ def run_ingestion(input_file: str, limit: Optional[int] = None):
     # Read input file
     log.info(f"Reading input: {input_file}")
     resumes = []
-    with open(input_file, "r", encoding="utf-8") as f:
-        for i, line in enumerate(f):
-            if limit and i >= limit:
-                break
-            line = line.strip()
-            if line:
-                resumes.append(json.loads(line))
+
+    # Attempt to detect file format (JSON array vs JSONL)
+    try:
+        with open(input_file, "r", encoding="utf-8") as f:
+            first_char = f.read(1)
+        
+        if first_char == '[':
+            log.info("Detected JSON Array format. Loading full file...")
+            with open(input_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, list):
+                    resumes = data
+                else:
+                    log.warning("File started with '[' but was not a list.")
+        else:
+            raise ValueError("Not a JSON array")
+
+    except Exception:
+        log.info("Reading as JSONL (Line-delimited)...")
+        with open(input_file, "r", encoding="utf-8") as f:
+            for i, line in enumerate(f):
+                if limit and len(resumes) >= limit:
+                    break
+                line = line.strip()
+                if line:
+                    try:
+                        resumes.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        pass
+    
+    # Apply limit if we loaded from JSON array 
+    if limit and len(resumes) > limit:
+        resumes = resumes[:limit]
     log.info(f"Loaded {len(resumes)} resumes")
 
     # Counters

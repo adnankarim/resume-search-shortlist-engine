@@ -234,12 +234,14 @@ def fetch_candidate_profiles(candidate_ids: list[str]) -> list[dict]:
                 "locationCountry": 1, "locationCity": 1,
                 "experience.title": 1, "experience.company": 1,
                 "skills": 1,
+                "personal_info.name": 1,
             },
         )
     )
     return [
         {
             "candidate_id": p.get("resumeId", ""),
+            "name": p.get("personal_info", {}).get("name", ""),
             "summary": p.get("summary", ""),
             "total_yoe": p.get("totalYOE", 0),
             "location_country": p.get("locationCountry", ""),

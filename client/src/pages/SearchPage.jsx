@@ -1,22 +1,7 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
 import { Link } from 'react-router-dom'
-import { searchResumes, fetchShortlistV2 } from '../services/api'
-
-// Feature flag — toggle V2 agentic search via URL param or localStorage
-function useV2Flag() {
-    const [v2, setV2] = useState(() => {
-        const url = new URL(window.location.href)
-        if (url.searchParams.has('v2')) return url.searchParams.get('v2') === 'true'
-        return localStorage.getItem('useShortlistV2') === 'true'
-    })
-    const toggle = () => {
-        setV2(prev => {
-            localStorage.setItem('useShortlistV2', (!prev).toString())
-            return !prev
-        })
-    }
-    return [v2, toggle]
-}
+import { searchResumes, fetchShortlistV2, getSession, createSession, updateSession } from '../services/api'
+import AgentPanel from '../components/AgentPanel'
 
 const STAGE_LABELS = {
     jd_understanding: { icon: '🧠', label: 'Understanding Query' },
@@ -27,7 +12,7 @@ const STAGE_LABELS = {
     assembly: { icon: '📦', label: 'Assembling Results' },
 }
 
-export default function SearchPage() {
+export default function SearchPage({ activeSessionId, onSessionCreated }) {
     // V1 state
     const [skills, setSkills] = useState([])
     const [inputValue, setInputValue] = useState('')
@@ -41,7 +26,6 @@ export default function SearchPage() {
     const inputRef = useRef(null)
 
     // V2 state
-    const [useV2, toggleV2] = useV2Flag()
     const [queryText, setQueryText] = useState('')
     const [agentEvents, setAgentEvents] = useState([])
     const [missionSpec, setMissionSpec] = useState(null)
@@ -53,6 +37,27 @@ export default function SearchPage() {
     const streamController = useRef(null)
     const eventsEndRef = useRef(null)
 
+    // Session state
+    const [currentSessionId, setCurrentSessionId] = useState(null)
+    const [loadingSession, setLoadingSession] = useState(false)
+    const [sessionLoaded, setSessionLoaded] = useState(false)
+
+    // Agent panel state
+    const [agentPanelOpen, setAgentPanelOpen] = useState(false)
+
+    // Timing state
+    const [stageTimings, setStageTimings] = useState({})
+    const [totalTime, setTotalTime] = useState(0)
+    const pipelineStartTime = useRef(null)
+    const runningSessionId = useRef(null)
+
+    // Sort state for results table
+    const [sortField, setSortField] = useState('final_score')
+    const [sortDir, setSortDir] = useState('desc')
+
+    // Search mode
+    const [searchMode, setSearchMode] = useState('ai') // 'ai' | 'classic'
+
     useEffect(() => {
         fetch('/api/resume/count')
             .then(res => res.json())
@@ -60,10 +65,68 @@ export default function SearchPage() {
             .catch(err => console.error('Failed to fetch count:', err))
     }, [])
 
-    // Auto-scroll agent events
+    // Load session when activeSessionId changes
     useEffect(() => {
-        eventsEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-    }, [agentEvents])
+        if (activeSessionId) {
+            // If we are currently running this session locally, don't reload from DB
+            // to avoid overwriting the live pipeline state
+            if (runningSessionId.current === activeSessionId && pipelineActive) {
+                return
+            }
+            loadSession(activeSessionId)
+        } else {
+            // New search — reset everything
+            resetState()
+        }
+    }, [activeSessionId])
+
+    const resetState = () => {
+        setQueryText('')
+        setAgentEvents([])
+        setMissionSpec(null)
+        setV2Results(null)
+        setCompletedStages([])
+        setActiveAgent(null)
+        setError(null)
+        setPipelineActive(false)
+        setCurrentSessionId(null)
+        setSessionLoaded(false)
+        setStageTimings({})
+        setTotalTime(0)
+        setResults(null)
+        setMeta(null)
+        runningSessionId.current = null
+    }
+
+    const loadSession = async (sessionId) => {
+        setLoadingSession(true)
+        try {
+            const data = await getSession(sessionId)
+            const session = data.session
+            // If running locally, don't overwrite
+            if (runningSessionId.current === sessionId && pipelineActive) return
+
+            setCurrentSessionId(session.sessionId)
+            setQueryText(session.queryText || '')
+            setMissionSpec(session.missionSpec || null)
+            setV2Results(session.results?.length > 0 ? { results: session.results, total_candidates_found: session.totalCandidatesFound, match_quality: session.match_quality } : null)
+            setAgentEvents(session.agentEvents || [])
+            setStageTimings(session.stageTimings || {})
+            setTotalTime(session.totalTime || 0)
+            setCompletedStages(Object.keys(session.stageTimings || {}))
+            setSessionLoaded(true)
+
+            // Only force pipeline inactive if it's not the one we are running
+            // (Though the check at start of function should handle this)
+            setPipelineActive(false)
+            setError(null)
+        } catch (err) {
+            console.error('Failed to load session:', err)
+            setError('Failed to load session')
+        } finally {
+            setLoadingSession(false)
+        }
+    }
 
     // ─── V1 handlers ───
     const addSkill = useCallback((value) => {
@@ -81,18 +144,18 @@ export default function SearchPage() {
     const handleKeyDown = (e) => {
         if (e.key === 'Enter' || e.key === ',') {
             e.preventDefault()
-            if (useV2) {
-                handleV2Search()
+            if (searchMode === 'ai') {
+                if (e.key === 'Enter' && !e.shiftKey) handleV2Search()
             } else {
                 addSkill(inputValue)
             }
-        } else if (!useV2 && e.key === 'Backspace' && !inputValue && skills.length > 0) {
+        } else if (searchMode === 'classic' && e.key === 'Backspace' && !inputValue && skills.length > 0) {
             removeSkill(skills[skills.length - 1])
         }
     }
 
     const handlePaste = (e) => {
-        if (useV2) return
+        if (searchMode === 'ai') return
         e.preventDefault()
         const pasted = e.clipboardData.getData('text')
         const parts = pasted.split(/[,;\n]+/).map(s => s.trim()).filter(Boolean)
@@ -131,7 +194,7 @@ export default function SearchPage() {
     }
 
     // ─── V2 handlers ───
-    const handleV2Search = () => {
+    const handleV2Search = async () => {
         const query = queryText.trim()
         if (!query) return
 
@@ -144,80 +207,133 @@ export default function SearchPage() {
         setError(null)
         setPipelineActive(true)
         setResults(null)
+        setStageTimings({})
+        setTotalTime(0)
+        setSessionLoaded(false)
+        pipelineStartTime.current = Date.now()
+
+        // Create session in DB
+        let sessionId = null
+        try {
+            const data = await createSession(query)
+            sessionId = data.session.sessionId
+            runningSessionId.current = sessionId // protect from loadSession override
+            setCurrentSessionId(sessionId)
+            onSessionCreated?.(sessionId)
+        } catch (err) {
+            console.error('Failed to create session:', err)
+        }
 
         // Cancel any existing stream
         streamController.current?.abort()
 
+        const collectedEvents = []
+        const collectedTimings = {}
+
         streamController.current = fetchShortlistV2({
             queryText: query,
             onEvent: (eventType, data) => {
-                handleAgentEvent(eventType, data)
+                const event = handleAgentEvent(eventType, data)
+                if (event) collectedEvents.push(event)
+
+                // Collect stage timings
+                if (eventType === 'stage_complete' && data.timing_ms != null) {
+                    const stage = data.stage
+                    collectedTimings[stage] = data.timing_ms / 1000
+                    setStageTimings(prev => ({ ...prev, [stage]: data.timing_ms / 1000 }))
+                }
+
+                // On result, save to session
+                if (eventType === 'result' && sessionId) {
+                    const elapsed = (Date.now() - pipelineStartTime.current) / 1000
+                    setTotalTime(elapsed)
+                    const resultData = data.data || data
+                    updateSession(sessionId, {
+                        status: 'completed',
+                        missionSpec: resultData.mission_spec || null,
+                        results: resultData.results || [],
+                        agentEvents: collectedEvents,
+                        stageTimings: collectedTimings,
+                        totalTime: elapsed,
+                        totalCandidatesFound: resultData.total_candidates_found || resultData.results?.length || 0,
+                    }).catch(err => console.error('Failed to save session:', err))
+                }
             },
             onError: (err) => {
                 setError(err?.message || 'Pipeline failed')
                 setPipelineActive(false)
+                if (sessionId) {
+                    updateSession(sessionId, { status: 'failed' }).catch(() => { })
+                }
             },
             onDone: () => {
                 setPipelineActive(false)
                 setActiveAgent(null)
+                if (!pipelineStartTime.current) return
+                const elapsed = (Date.now() - pipelineStartTime.current) / 1000
+                setTotalTime(elapsed)
             },
         })
     }
 
     const handleAgentEvent = (eventType, data) => {
         const timestamp = new Date().toLocaleTimeString()
+        let event = null
 
         switch (eventType) {
             case 'agent_start':
                 setActiveAgent(data.agent)
-                setAgentEvents(prev => [...prev, { type: 'agent_start', ...data, timestamp }])
+                event = { type: 'agent_start', ...data, timestamp }
+                setAgentEvents(prev => [...prev, event])
                 break
-
             case 'agent_thought':
-                setAgentEvents(prev => [...prev, { type: 'thought', ...data, timestamp }])
+                event = { type: 'thought', ...data, timestamp }
+                setAgentEvents(prev => [...prev, event])
                 break
-
             case 'tool_call':
-                setAgentEvents(prev => [...prev, { type: 'tool_call', ...data, timestamp }])
+                event = { type: 'tool_call', ...data, timestamp }
+                setAgentEvents(prev => [...prev, event])
                 break
-
             case 'tool_result':
-                setAgentEvents(prev => [...prev, { type: 'tool_result', ...data, timestamp }])
+                event = { type: 'tool_result', ...data, timestamp }
+                setAgentEvents(prev => [...prev, event])
                 break
-
             case 'stage_complete':
                 setCompletedStages(prev => [...prev, data.stage])
-                setAgentEvents(prev => [...prev, { type: 'stage_complete', ...data, timestamp }])
+                event = { type: 'stage_complete', ...data, timestamp }
+                setAgentEvents(prev => [...prev, event])
                 break
-
             case 'mission_spec':
                 setMissionSpec(data.data || data)
-                setAgentEvents(prev => [...prev, { type: 'mission_spec', ...data, timestamp }])
+                event = { type: 'mission_spec', ...data, timestamp }
+                setAgentEvents(prev => [...prev, event])
                 break
-
             case 'result':
                 setV2Results(data.data || data)
-                setAgentEvents(prev => [...prev, { type: 'result', message: data.message, timestamp }])
+                event = { type: 'result', message: data.message, timestamp }
+                setAgentEvents(prev => [...prev, event])
                 setPipelineActive(false)
                 setActiveAgent(null)
+                runningSessionId.current = null
                 break
-
             case 'error':
                 setError(data.message)
                 setPipelineActive(false)
                 setActiveAgent(null)
+                runningSessionId.current = null
                 break
-
             case 'done':
                 setPipelineActive(false)
                 setActiveAgent(null)
+                runningSessionId.current = null
                 break
-
             default:
                 if (data.message) {
-                    setAgentEvents(prev => [...prev, { type: 'info', ...data, timestamp }])
+                    event = { type: 'info', ...data, timestamp }
+                    setAgentEvents(prev => [...prev, event])
                 }
         }
+        return event
     }
 
     const cancelPipeline = () => {
@@ -231,154 +347,187 @@ export default function SearchPage() {
         return text.slice(0, maxLen) + '…'
     }
 
-    // Use V2 results if available
-    const displayResults = useV2 ? (v2Results?.results || null) : results
+    // Sorting
+    const handleSort = (field) => {
+        if (sortField === field) {
+            setSortDir(prev => prev === 'asc' ? 'desc' : 'asc')
+        } else {
+            setSortField(field)
+            setSortDir('desc')
+        }
+    }
+
+    const displayResults = searchMode === 'ai' ? (v2Results?.results || null) : results
+    const sortedResults = displayResults ? [...displayResults].sort((a, b) => {
+        let aVal, bVal
+        switch (sortField) {
+            case 'final_score':
+                aVal = a.finalScore || a.final_score || 0
+                bVal = b.finalScore || b.final_score || 0
+                break
+            case 'name':
+                aVal = (a.name || a.headline || '').toLowerCase()
+                bVal = (b.name || b.headline || '').toLowerCase()
+                return sortDir === 'asc' ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal)
+            case 'experience':
+                aVal = a.totalYOE || a.total_yoe || 0
+                bVal = b.totalYOE || b.total_yoe || 0
+                break
+            default:
+                aVal = a.finalScore || a.final_score || 0
+                bVal = b.finalScore || b.final_score || 0
+        }
+        return sortDir === 'asc' ? aVal - bVal : bVal - aVal
+    }) : null
+
+    const isAI = searchMode === 'ai'
+    const hasEvents = agentEvents.length > 0
+    const matchQuality = v2Results?.match_quality || 'strong'
 
     return (
-        <div className="search-page">
-            {/* ─── Mode Toggle ─── */}
-            <div className="v2-toggle">
+        <div className="search-page-v3">
+            {/* Mode selector (minimal) */}
+            <div className="search-mode-bar">
                 <button
-                    className={`v2-toggle-btn ${useV2 ? 'active' : ''}`}
-                    onClick={toggleV2}
-                    title={useV2 ? 'Switch to classic search' : 'Switch to AI-powered search'}
+                    className={`mode-tab ${searchMode === 'ai' ? 'active' : ''}`}
+                    onClick={() => setSearchMode('ai')}
                 >
-                    {useV2 ? '🤖 AI Agent Search' : '🔍 Classic Search'}
+                    🤖 AI Agent Search
                 </button>
+                <button
+                    className={`mode-tab ${searchMode === 'classic' ? 'active' : ''}`}
+                    onClick={() => setSearchMode('classic')}
+                >
+                    🔍 Classic Search
+                </button>
+                {hasEvents && (
+                    <button
+                        className={`agent-panel-toggle ${agentPanelOpen ? 'active' : ''}`}
+                        onClick={() => setAgentPanelOpen(!agentPanelOpen)}
+                        title="Toggle Agent Panel"
+                    >
+                        🤖 Agents {pipelineActive && '⟳'}
+                    </button>
+                )}
             </div>
 
-            {/* ─── V2 Search Bar ─── */}
-            {useV2 ? (
-                <div className="search-bar v2">
-                    <div className="v2-query-area">
-                        <textarea
-                            value={queryText}
-                            onChange={e => setQueryText(e.target.value)}
-                            onKeyDown={e => {
-                                if (e.key === 'Enter' && !e.shiftKey) {
-                                    e.preventDefault()
-                                    handleV2Search()
-                                }
-                            }}
-                            placeholder="Describe the ideal candidate or paste a job description...&#10;&#10;Example: Looking for a senior Python developer with 5+ years experience in machine learning, familiar with AWS and Docker. Must know PyTorch or TensorFlow."
-                            rows={4}
-                            className="v2-textarea"
-                            disabled={pipelineActive}
-                        />
-                    </div>
-                    <div className="search-controls">
-                        <button
-                            className="search-btn v2"
-                            onClick={handleV2Search}
-                            disabled={!queryText.trim() || pipelineActive}
-                        >
-                            {pipelineActive ? '⏳ Agents Working…' : '🤖 AI Search'}
-                        </button>
-                        {pipelineActive && (
-                            <button className="cancel-btn" onClick={cancelPipeline}>
-                                ✕ Cancel
-                            </button>
-                        )}
-                    </div>
-                </div>
-            ) : (
-                /* ─── V1 Search Bar ─── */
-                <div className="search-bar">
-                    <div className="search-input-area" onClick={() => inputRef.current?.focus()}>
-                        {skills.map(skill => (
-                            <span key={skill} className="skill-chip input">
-                                {skill}
-                                <button className="remove-btn" onClick={(e) => { e.stopPropagation(); removeSkill(skill) }}>×</button>
-                            </span>
-                        ))}
-                        <input
-                            ref={inputRef}
-                            type="text"
-                            value={inputValue}
-                            onChange={e => setInputValue(e.target.value)}
-                            onKeyDown={handleKeyDown}
-                            onPaste={handlePaste}
-                            placeholder={skills.length === 0 ? 'Enter skills (e.g. python, javascript, machine learning)' : 'Add more skills…'}
-                        />
-                    </div>
-                    <div className="search-controls">
-                        <div className="mode-toggle">
-                            <button className={`mode-btn ${mode === 'match_all' ? 'active' : ''}`} onClick={() => setMode('match_all')}>Match ALL</button>
-                            <button className={`mode-btn ${mode === 'match_at_least' ? 'active' : ''}`} onClick={() => setMode('match_at_least')}>Match at least N</button>
-                        </div>
-                        {mode === 'match_at_least' && (
-                            <div className="min-match-input">
-                                <label>Min:</label>
-                                <input type="number" min={1} max={skills.length || 1} value={minMatch} onChange={e => setMinMatch(Math.max(1, parseInt(e.target.value) || 1))} />
-                                <label>of {skills.length}</label>
-                            </div>
-                        )}
-                        <button className="search-btn" onClick={handleV1Search} disabled={(skills.length === 0 && !inputValue.trim()) || loading}>
-                            {loading ? 'Searching…' : '⌕ Search Candidates'}
-                        </button>
-                    </div>
+            {/* Loading session */}
+            {loadingSession && (
+                <div className="loading-state">
+                    <div className="spinner" />
+                    <p>Loading session…</p>
                 </div>
             )}
 
-            {/* ─── Agent Activity Panel (V2 only) ─── */}
-            {useV2 && agentEvents.length > 0 && (
-                <div className="agent-panel">
-                    <div className="agent-panel-header">
-                        <h3>🤖 Agent Activity</h3>
-                        {/* Stage Progress */}
-                        <div className="stage-progress">
-                            {Object.entries(STAGE_LABELS).map(([key, { icon, label }]) => (
-                                <div
-                                    key={key}
-                                    className={`stage-chip ${completedStages.includes(key) ? 'completed' : ''} ${activeAgent === label || activeAgent === key ? 'active' : ''}`}
+            {/* Search Input */}
+            {!loadingSession && (
+                <>
+                    {isAI ? (
+                        <div className="search-bar v2">
+                            <div className="v2-query-area">
+                                <textarea
+                                    value={queryText}
+                                    onChange={e => setQueryText(e.target.value)}
+                                    onKeyDown={e => {
+                                        if (e.key === 'Enter' && !e.shiftKey) {
+                                            e.preventDefault()
+                                            handleV2Search()
+                                        }
+                                    }}
+                                    placeholder="Describe the ideal candidate or paste a job description...&#10;&#10;Example: Senior Python developer with 5+ years in ML, AWS, Docker."
+                                    rows={3}
+                                    className="v2-textarea"
+                                    disabled={pipelineActive}
+                                />
+                            </div>
+                            <div className="search-controls">
+                                <button
+                                    className="search-btn v2"
+                                    onClick={handleV2Search}
+                                    disabled={!queryText.trim() || pipelineActive}
                                 >
-                                    <span>{icon}</span>
-                                    <span className="stage-label">{label}</span>
-                                    {completedStages.includes(key) && <span className="checkmark">✓</span>}
-                                </div>
-                            ))}
+                                    {pipelineActive ? '⏳ Agents Working…' : '🤖 Run Analysis'}
+                                </button>
+                                {pipelineActive && (
+                                    <button className="cancel-btn" onClick={cancelPipeline}>
+                                        ✕ Cancel
+                                    </button>
+                                )}
+                            </div>
                         </div>
+                    ) : (
+                        <div className="search-bar">
+                            <div className="search-input-area" onClick={() => inputRef.current?.focus()}>
+                                {skills.map(skill => (
+                                    <span key={skill} className="skill-chip input">
+                                        {skill}
+                                        <button className="remove-btn" onClick={(e) => { e.stopPropagation(); removeSkill(skill) }}>×</button>
+                                    </span>
+                                ))}
+                                <input
+                                    ref={inputRef}
+                                    type="text"
+                                    value={inputValue}
+                                    onChange={e => setInputValue(e.target.value)}
+                                    onKeyDown={handleKeyDown}
+                                    onPaste={handlePaste}
+                                    placeholder={skills.length === 0 ? 'Enter skills (e.g. python, javascript, machine learning)' : 'Add more skills…'}
+                                />
+                            </div>
+                            <div className="search-controls">
+                                <div className="mode-toggle">
+                                    <button className={`mode-btn ${mode === 'match_all' ? 'active' : ''}`} onClick={() => setMode('match_all')}>Match ALL</button>
+                                    <button className={`mode-btn ${mode === 'match_at_least' ? 'active' : ''}`} onClick={() => setMode('match_at_least')}>Match ≥ N</button>
+                                </div>
+                                {mode === 'match_at_least' && (
+                                    <div className="min-match-input">
+                                        <label>Min:</label>
+                                        <input type="number" min={1} max={skills.length || 1} value={minMatch} onChange={e => setMinMatch(Math.max(1, parseInt(e.target.value) || 1))} />
+                                        <label>of {skills.length}</label>
+                                    </div>
+                                )}
+                                <button className="search-btn" onClick={handleV1Search} disabled={(skills.length === 0 && !inputValue.trim()) || loading}>
+                                    {loading ? 'Searching…' : '⌕ Search'}
+                                </button>
+                            </div>
+                        </div>
+                    )}
+                </>
+            )}
+
+            {/* ─── Inline Agent Progress (during pipeline) ─── */}
+            {isAI && pipelineActive && (
+                <div className="agent-progress-inline">
+                    <div className="agent-progress-header">
+                        <span className="agent-progress-pulse"></span>
+                        <span>Agents analyzing your query…</span>
                     </div>
-                    <div className="agent-events">
-                        {agentEvents.map((ev, i) => (
-                            <div key={i} className={`agent-event ${ev.type}`}>
-                                <span className="event-time">{ev.timestamp}</span>
-                                <span className={`event-badge ${ev.type}`}>
-                                    {ev.type === 'agent_start' && '🤖'}
-                                    {ev.type === 'thought' && '💭'}
-                                    {ev.type === 'tool_call' && '🔧'}
-                                    {ev.type === 'tool_result' && '📊'}
-                                    {ev.type === 'stage_complete' && '✅'}
-                                    {ev.type === 'mission_spec' && '📋'}
-                                    {ev.type === 'result' && '🎯'}
-                                    {ev.type === 'info' && 'ℹ️'}
-                                </span>
-                                {ev.agent && <span className="event-agent">[{ev.agent}]</span>}
-                                <span className="event-message">{ev.message}</span>
-                                {ev.timing_ms && <span className="event-timing">{ev.timing_ms}ms</span>}
-                            </div>
-                        ))}
-                        {pipelineActive && (
-                            <div className="agent-event thinking">
-                                <span className="thinking-dots">
-                                    <span>●</span><span>●</span><span>●</span>
-                                </span>
-                            </div>
-                        )}
-                        <div ref={eventsEndRef} />
+                    <div className="agent-timeline-inline">
+                        {Object.entries(STAGE_LABELS).map(([key, { icon, label }]) => {
+                            const isCompleted = completedStages.includes(key)
+                            const isActive = activeAgent === label || activeAgent === key
+                            const timing = stageTimings[key]
+                            return (
+                                <div key={key} className={`timeline-step ${isCompleted ? 'completed' : ''} ${isActive ? 'active' : ''}`}>
+                                    <div className="timeline-step-marker">
+                                        {isCompleted ? '✓' : isActive ? <span className="step-spinner"></span> : <span className="step-dot"></span>}
+                                    </div>
+                                    <div className="timeline-step-info">
+                                        <span className="timeline-step-label">{icon} {label}</span>
+                                        {timing != null && <span className="timeline-step-time">{timing.toFixed(1)}s</span>}
+                                    </div>
+                                </div>
+                            )
+                        })}
                     </div>
                 </div>
             )}
 
-            {/* ─── MissionSpec Panel (V2 only) ─── */}
-            {useV2 && missionSpec && (
-                <MissionSpecPanel spec={missionSpec} />
-            )}
-
-            {/* ─── Status ─── */}
+            {/* Error */}
             {error && <div className="error-state">⚠ {error}</div>}
 
-            {!useV2 && meta && (
+            {/* V1 Meta */}
+            {!isAI && meta && (
                 <div className="search-meta">
                     <span><strong>{meta.totalCandidates}</strong> candidates matched</span>
                     <span>·</span>
@@ -388,246 +537,199 @@ export default function SearchPage() {
                 </div>
             )}
 
-            {useV2 && v2Results && (
-                <div className="search-meta v2">
-                    <span><strong>{v2Results.total_candidates_found || v2Results.results?.length}</strong> candidates ranked</span>
-                    <span>·</span>
-                    <span><strong>{v2Results.results?.length}</strong> returned</span>
-                    {v2Results.stage_timings && (
-                        <>
-                            <span>·</span>
-                            <span>{Object.values(v2Results.stage_timings).reduce((a, b) => a + b, 0).toFixed(1)}s total</span>
-                        </>
+            {/* V2 Results Meta */}
+            {isAI && v2Results && !pipelineActive && (
+                <>
+                    {/* Weak match banner */}
+                    {matchQuality === 'weak' && (
+                        <div className="weak-match-banner">
+                            <div className="weak-match-icon">⚠️</div>
+                            <div className="weak-match-text">
+                                <strong>No strong matches found for your query.</strong>
+                                <p>The candidates below are <em>weak matches</em> — they may have some relevant experience but don't closely match your requirements. Consider broadening your search criteria or adjusting the required skills.</p>
+                            </div>
+                        </div>
                     )}
-                    <button className="dev-toggle" onClick={() => setShowScores(!showScores)}>
-                        {showScores ? '🔒 Hide Scores' : '🔓 Show Scores'}
-                    </button>
-                </div>
+
+                    {matchQuality === 'none' && (
+                        <div className="no-match-banner">
+                            <div className="no-match-icon">❌</div>
+                            <div className="no-match-text">
+                                <strong>No candidates found matching this query.</strong>
+                                <p>Try a broader description, different skills, or fewer constraints.</p>
+                            </div>
+                        </div>
+                    )}
+
+                    <div className={`results-meta-bar ${matchQuality === 'weak' ? 'weak' : ''}`}>
+                        <div className="results-meta-left">
+                            <span className="results-meta-count">
+                                <strong>{v2Results.results?.length}</strong> {matchQuality === 'weak' ? 'weak matches' : 'candidates'}
+                            </span>
+                            <span className="results-meta-sep">·</span>
+                            <span className="results-meta-total">
+                                {v2Results.total_candidates_found || v2Results.results?.length} analyzed
+                            </span>
+                            <span className="results-meta-sep">·</span>
+                            <span className="results-meta-time">
+                                ⏱ {totalTime.toFixed(1)}s
+                            </span>
+                        </div>
+                        <div className="results-meta-right">
+                            <button className="dev-toggle" onClick={() => setShowScores(!showScores)}>
+                                {showScores ? '🔒 Hide Scores' : '🔓 Scores'}
+                            </button>
+                            <button
+                                className="rerun-btn"
+                                onClick={handleV2Search}
+                                title="Re-run analysis"
+                            >
+                                🔄 Re-run
+                            </button>
+                        </div>
+                    </div>
+                </>
             )}
 
-            {/* ─── Loading (V1 only) ─── */}
-            {!useV2 && loading && (
+            {/* Loading (V1) */}
+            {!isAI && loading && (
                 <div className="loading-state">
                     <div className="spinner" />
                     <p>Searching across {totalCount ? `${totalCount.toLocaleString()} resumes` : 'resumes'}…</p>
                 </div>
             )}
 
-            {/* ─── Empty State ─── */}
-            {!loading && !pipelineActive && !displayResults && !error && (
+            {/* Empty State */}
+            {!loading && !pipelineActive && !sortedResults && !error && !loadingSession && (
                 <div className="empty-state">
-                    <div className="empty-state-icon">{useV2 ? '🤖' : '🔍'}</div>
-                    <h3>{useV2 ? 'AI-Powered Candidate Search' : 'Search for candidates by skills'}</h3>
-                    <p>{useV2
+                    <div className="empty-state-icon">{isAI ? '🤖' : '🔍'}</div>
+                    <h3>{isAI ? 'AI-Powered Candidate Search' : 'Search for candidates by skills'}</h3>
+                    <p>{isAI
                         ? 'Describe the ideal candidate or paste a job description. Our AI agents will analyze, search, and rank candidates for you.'
-                        : 'Enter one or more skills above to find matching resumes with evidence-backed results.'
+                        : 'Enter one or more skills above to find matching resumes.'
                     }</p>
-                </div>
-            )}
-
-            {/* ─── Results ─── */}
-            {displayResults && displayResults.length === 0 && (
-                <div className="empty-state">
-                    <div className="empty-state-icon">📭</div>
-                    <h3>No candidates found</h3>
-                    <p>{useV2 ? 'Try a different query or broader requirements.' : 'Try fewer skills or switch to "Match at least N" mode.'}</p>
-                </div>
-            )}
-
-            {displayResults && displayResults.length > 0 && (
-                <div className="results-grid">
-                    {displayResults.map((r, idx) => (
-                        <div key={r.resumeId || r.candidate_id} className="result-card-wrapper" style={{ position: 'relative' }}>
-                            <Link to={`/profile/${r.resumeId || r.candidate_id}`} className="result-card">
-                                <div className="result-card-header">
-                                    <div className="result-card-top">
-                                        <div className="result-headline">{truncate(r.headline, 60)}</div>
-                                        <button
-                                            className="delete-btn"
-                                            onClick={(e) => {
-                                                e.preventDefault()
-                                                e.stopPropagation()
-                                                if (window.confirm('Delete this resume?')) {
-                                                    if (useV2) {
-                                                        setV2Results(prev => ({
-                                                            ...prev,
-                                                            results: prev.results.filter(res => res.candidate_id !== r.candidate_id)
-                                                        }))
-                                                    } else {
-                                                        setResults(prev => prev.filter(res => res.resumeId !== r.resumeId))
-                                                    }
-                                                    import('../services/api').then(api => api.deleteResume(r.resumeId || r.candidate_id).catch(err => console.error(err)))
-                                                }
-                                            }}
-                                            title="Delete Resume"
-                                        >🗑</button>
-                                    </div>
-                                    <div className="result-meta">
-                                        {(r.totalYOE || r.total_yoe) > 0 && (
-                                            <span className="result-meta-item">📅 {r.totalYOE || r.total_yoe} yrs</span>
-                                        )}
-                                        {(r.locationCountry || r.location_country) && (
-                                            <span className="result-meta-item">📍 {r.locationCountry || r.location_country}</span>
-                                        )}
-                                    </div>
-
-                                    {/* Score badges */}
-                                    <div className="result-score-container">
-                                        <span className="result-score-badge similarity" title={`Score: ${r.finalScore || r.final_score}`}>
-                                            🎯 {Math.round(r.finalScore || r.final_score || 0)}% Match
-                                        </span>
-                                        {(r.matchedSkills || r.matched_skills)?.length > 0 && (
-                                            <span className="result-score-badge skills">
-                                                {(r.matchedSkills || r.matched_skills).length} skills
-                                            </span>
-                                        )}
-                                    </div>
-                                </div>
-
-                                {/* V2: Dev score breakdown */}
-                                {useV2 && showScores && r.score_breakdown && (
-                                    <div className="result-score-breakdown v2">
-                                        <span>RRF: {r.score_breakdown.rrf_score?.toFixed(4)}</span>
-                                        <span>CE: {r.score_breakdown.rerank_score?.toFixed(3)}</span>
-                                        {r.score_breakdown.dense_rank && <span>Dense: #{r.score_breakdown.dense_rank}</span>}
-                                        {r.score_breakdown.sparse_rank && <span>Sparse: #{r.score_breakdown.sparse_rank}</span>}
-                                    </div>
-                                )}
-
-                                {/* V1: Score breakdown */}
-                                {!useV2 && (
-                                    <div className="result-score-breakdown" style={{
-                                        padding: '0.5rem 1rem', background: 'rgba(255,255,255,0.03)',
-                                        fontSize: '0.75rem', color: 'var(--text-muted)',
-                                        display: 'flex', justifyContent: 'space-between',
-                                        borderTop: '1px solid rgba(255,255,255,0.05)'
-                                    }}>
-                                        <span>AI Similarity: {r.semanticScore}%</span>
-                                        <span>Skills Match: {r.skillScore}%</span>
-                                    </div>
-                                )}
-
-                                {/* Matched Skills */}
-                                <div className="result-skills">
-                                    {(r.matchedSkills || r.matched_skills || []).slice(0, 5).map(skill => (
-                                        <span key={skill} className="skill-chip matched small">✓ {skill}</span>
-                                    ))}
-                                    {(r.matchedSkills || r.matched_skills || []).length > 5 && (
-                                        <span className="skill-chip matched small">+{(r.matchedSkills || r.matched_skills).length - 5}</span>
-                                    )}
-                                </div>
-
-                                {/* V2: Evidence pack + highlights */}
-                                {useV2 && r.evidence_pack?.evidence?.length > 0 && (
-                                    <div className="result-evidence v2">
-                                        {r.highlights?.length > 0 && (
-                                            <div className="evidence-highlights">
-                                                {r.highlights.map((h, i) => (
-                                                    <div key={i} className="highlight-item">
-                                                        <span className="highlight-icon">✨</span>
-                                                        <span>{truncate(h, 100)}</span>
-                                                    </div>
-                                                ))}
-                                            </div>
-                                        )}
-                                        <div className="evidence-chunks">
-                                            {r.evidence_pack.evidence.slice(0, 2).map((e, i) => (
-                                                <div key={i} className="evidence-chunk">
-                                                    <span className={`match-badge ${e.why_matched}`}>
-                                                        {e.why_matched === 'both' ? '🔗' : e.why_matched === 'dense' ? '🧠' : '📝'}
-                                                        {e.why_matched}
-                                                    </span>
-                                                    {e.section && <span className="evidence-section">[{e.section}]</span>}
-                                                    <span className="evidence-text">{truncate(e.text_snippet, 120)}</span>
-                                                </div>
-                                            ))}
-                                        </div>
-                                    </div>
-                                )}
-
-                                {/* V1: Basic evidence */}
-                                {!useV2 && r.evidence && r.evidence.length > 0 && (
-                                    <div className="result-evidence">
-                                        <div className="evidence-snippet">
-                                            {truncate(r.evidence[0].chunkText, 120)}
-                                        </div>
-                                    </div>
-                                )}
-                            </Link>
-                        </div>
-                    ))}
-                </div>
-            )}
-        </div>
-    )
-}
-
-// ─── MissionSpec Panel Component ───
-function MissionSpecPanel({ spec }) {
-    const [collapsed, setCollapsed] = useState(false)
-
-    if (!spec) return null
-
-    return (
-        <div className={`mission-spec-panel ${collapsed ? 'collapsed' : ''}`}>
-            <div className="mission-spec-header" onClick={() => setCollapsed(!collapsed)}>
-                <h3>📋 Extracted Requirements</h3>
-                <span className="collapse-toggle">{collapsed ? '▶' : '▼'}</span>
-            </div>
-            {!collapsed && (
-                <div className="mission-spec-body">
-                    {spec.must_have?.length > 0 && (
-                        <div className="spec-section">
-                            <label>Must Have</label>
-                            <div className="spec-chips">
-                                {spec.must_have.map((s, i) => (
-                                    <span key={i} className="spec-chip must">{s}</span>
-                                ))}
-                            </div>
-                        </div>
-                    )}
-                    {spec.nice_to_have?.length > 0 && (
-                        <div className="spec-section">
-                            <label>Nice to Have</label>
-                            <div className="spec-chips">
-                                {spec.nice_to_have.map((s, i) => (
-                                    <span key={i} className="spec-chip nice">{s}</span>
-                                ))}
-                            </div>
-                        </div>
-                    )}
-                    {spec.negative_constraints?.length > 0 && (
-                        <div className="spec-section">
-                            <label>Excluded</label>
-                            <div className="spec-chips">
-                                {spec.negative_constraints.map((s, i) => (
-                                    <span key={i} className="spec-chip negative">{s}</span>
-                                ))}
-                            </div>
-                        </div>
-                    )}
-                    {spec.min_years && (
-                        <div className="spec-section">
-                            <label>Min Experience</label>
-                            <span className="spec-value">{spec.min_years}+ years</span>
-                        </div>
-                    )}
-                    {spec.location && (
-                        <div className="spec-section">
-                            <label>Location</label>
-                            <span className="spec-value">{spec.location}</span>
-                        </div>
-                    )}
-                    {spec.clarifications?.length > 0 && (
-                        <div className="spec-section clarifications">
-                            <label>💡 Suggestions</label>
-                            {spec.clarifications.map((c, i) => (
-                                <div key={i} className="clarification">{c}</div>
+                    {isAI && (
+                        <div className="empty-state-examples">
+                            <p className="examples-label">Try:</p>
+                            {['Senior full-stack developer with React and Node.js',
+                                'Data scientist with Python, PyTorch, 3+ years experience',
+                                'DevOps engineer familiar with AWS, Kubernetes, CI/CD'
+                            ].map((ex, i) => (
+                                <button key={i} className="example-query-btn" onClick={() => setQueryText(ex)}>
+                                    {ex}
+                                </button>
                             ))}
                         </div>
                     )}
                 </div>
             )}
+
+            {/* No Results */}
+            {sortedResults && sortedResults.length === 0 && (
+                <div className="empty-state">
+                    <div className="empty-state-icon">📭</div>
+                    <h3>No candidates found</h3>
+                    <p>{isAI ? 'Try a different query or broader requirements.' : 'Try fewer skills.'}</p>
+                </div>
+            )}
+
+            {/* ─── Results Table ─── */}
+            {sortedResults && sortedResults.length > 0 && (
+                <div className="results-section">
+                    <table className="results-table">
+                        <thead>
+                            <tr>
+                                <th className="th-rank">#</th>
+                                <th className="th-sortable" onClick={() => handleSort('name')}>
+                                    Candidate {sortField === 'name' && (sortDir === 'asc' ? '▲' : '▼')}
+                                </th>
+                                <th className="th-sortable th-score" onClick={() => handleSort('final_score')}>
+                                    Match {sortField === 'final_score' && (sortDir === 'asc' ? '▲' : '▼')}
+                                </th>
+                                <th className="th-skills">Skills</th>
+                                <th className="th-sortable th-exp" onClick={() => handleSort('experience')}>
+                                    Exp {sortField === 'experience' && (sortDir === 'asc' ? '▲' : '▼')}
+                                </th>
+                                <th className="th-location">Location</th>
+                                <th className="th-actions">View</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {sortedResults.map((r, idx) => {
+                                const score = Math.round(r.finalScore || r.final_score || 0)
+                                const yoe = r.totalYOE || r.total_yoe || 0
+                                const location = r.location_country || r.locationCountry || ''
+                                const matchedSkills = r.matchedSkills || r.matched_skills || []
+                                const name = r.name || truncate(r.headline, 40) || 'Unknown'
+
+                                return (
+                                    <tr key={r.resumeId || r.candidate_id} className="result-row">
+                                        <td className="td-rank">{idx + 1}</td>
+                                        <td className="td-candidate">
+                                            <div className="candidate-cell">
+                                                <Link to={`/profile/${r.resumeId || r.candidate_id}`} className="candidate-name-link">
+                                                    {name}
+                                                </Link>
+                                                <span className="candidate-headline">{truncate(r.headline, 50)}</span>
+                                            </div>
+                                        </td>
+                                        <td className="td-score">
+                                            <div className={`score-badge ${score >= 80 ? 'high' : score >= 60 ? 'mid' : 'low'}`}>
+                                                {score}%
+                                            </div>
+                                            {isAI && showScores && r.score_breakdown && (
+                                                <div className="score-detail">
+                                                    RRF:{r.score_breakdown.rrf_score?.toFixed(3)} CE:{r.score_breakdown.rerank_score?.toFixed(2)}
+                                                </div>
+                                            )}
+                                        </td>
+                                        <td className="td-skills">
+                                            <div className="skills-cell">
+                                                {matchedSkills.slice(0, 3).map(s => (
+                                                    <span key={s} className="skill-chip matched tiny">✓ {s}</span>
+                                                ))}
+                                                {matchedSkills.length > 3 && (
+                                                    <span className="skill-more">+{matchedSkills.length - 3}</span>
+                                                )}
+                                            </div>
+                                        </td>
+                                        <td className="td-exp">{yoe > 0 ? `${yoe}y` : '—'}</td>
+                                        <td className="td-location">{location || '—'}</td>
+                                        <td className="td-actions">
+                                            <Link to={`/profile/${r.resumeId || r.candidate_id}`} className="view-btn">
+                                                →
+                                            </Link>
+                                        </td>
+                                    </tr>
+                                )
+                            })}
+                        </tbody>
+                    </table>
+
+                    {/* Total time footer */}
+                    {isAI && totalTime > 0 && (
+                        <div className="results-footer">
+                            <span>Analysis completed in <strong>{totalTime.toFixed(1)}s</strong></span>
+                            <span className="results-footer-sep">·</span>
+                            <span>{sortedResults.length} candidates returned</span>
+                        </div>
+                    )}
+                </div>
+            )}
+
+            {/* Agent Panel (right slide-out) */}
+            <AgentPanel
+                open={agentPanelOpen}
+                onClose={() => setAgentPanelOpen(false)}
+                agentEvents={agentEvents}
+                stageLabels={STAGE_LABELS}
+                completedStages={completedStages}
+                activeAgent={activeAgent}
+                pipelineActive={pipelineActive}
+                missionSpec={missionSpec}
+                stageTimings={stageTimings}
+                totalTime={totalTime}
+            />
         </div>
     )
 }

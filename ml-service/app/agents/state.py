@@ -18,6 +18,7 @@ class MissionSpec(BaseModel):
     negative_constraints: list[str] = Field(default_factory=list, description="Skills/domains to exclude")
     min_years: Optional[int] = Field(default=None, description="Minimum years of experience")
     location: Optional[str] = Field(default=None, description="Preferred location")
+    core_domain: str = Field(default="", description="Primary professional domain, e.g. 'digital marketing', 'python development'")
     weights: dict[str, float] = Field(default_factory=dict, description="Facet weights")
     clarifications: list[str] = Field(default_factory=list, description="Missing info suggestions")
     raw_query: str = Field(default="", description="Original query text")
@@ -70,6 +71,7 @@ class ScoreBreakdown(BaseModel):
 class ShortlistResult(BaseModel):
     """Final result for a single candidate."""
     candidate_id: str
+    name: str = ""
     final_score: float = 0.0
     score_breakdown: ScoreBreakdown = Field(default_factory=ScoreBreakdown)
     evidence_pack: EvidencePack = Field(default_factory=lambda: EvidencePack(candidate_id=""))
@@ -90,6 +92,7 @@ class ShortlistResponse(BaseModel):
     suggested_refinements: list[str] = Field(default_factory=list)
     stage_timings: dict[str, float] = Field(default_factory=dict)
     total_candidates_found: int = 0
+    match_quality: str = "strong"  # "strong" | "weak" | "none"
 
 
 # ─── LangGraph State ───

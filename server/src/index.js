@@ -11,6 +11,7 @@ const searchRoutes = require("./routes/search");
 const resumeRoutes = require("./routes/resume");
 const adminRoutes = require("./routes/admin");
 const shortlistRoutes = require("./routes/shortlist");
+const sessionsRoutes = require("./routes/sessions");
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -27,6 +28,7 @@ app.use("/api/search", searchRoutes);
 app.use("/api/resume", resumeRoutes);
 app.use("/api/admin", adminRoutes);
 app.use("/api/shortlist", shortlistRoutes);
+app.use("/api/sessions", sessionsRoutes);
 
 // Health check
 app.get("/api/health", (req, res) => {

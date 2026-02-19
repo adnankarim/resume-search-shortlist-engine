@@ -72,3 +72,45 @@ export function fetchShortlistV2({ queryText, filters, onEvent, onError, onDone 
 
     return controller;
 }
+
+// ─── Session API ───
+
+export async function getSessions() {
+    const res = await fetch(`${API_BASE}/sessions`);
+    if (!res.ok) throw new Error(`Failed to fetch sessions: ${res.statusText}`);
+    return res.json();
+}
+
+export async function getSession(sessionId) {
+    const res = await fetch(`${API_BASE}/sessions/${sessionId}`);
+    if (!res.ok) throw new Error(`Failed to fetch session: ${res.statusText}`);
+    return res.json();
+}
+
+export async function createSession(queryText, title) {
+    const res = await fetch(`${API_BASE}/sessions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ queryText, title }),
+    });
+    if (!res.ok) throw new Error(`Failed to create session: ${res.statusText}`);
+    return res.json();
+}
+
+export async function updateSession(sessionId, data) {
+    const res = await fetch(`${API_BASE}/sessions/${sessionId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data),
+    });
+    if (!res.ok) throw new Error(`Failed to update session: ${res.statusText}`);
+    return res.json();
+}
+
+export async function deleteSession(sessionId) {
+    const res = await fetch(`${API_BASE}/sessions/${sessionId}`, {
+        method: 'DELETE',
+    });
+    if (!res.ok) throw new Error(`Failed to delete session: ${res.statusText}`);
+    return res.json();
+}

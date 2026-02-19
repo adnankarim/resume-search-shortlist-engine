@@ -1,138 +1,177 @@
-# Resume Search MVP
+# Resume Search AI — Agentic RAG Platform
 
-High-accuracy resume search system for 4,607 structured resumes with deterministic skill matching, hybrid retrieval, and explainable results.
+A production-grade, agentic RAG (Retrieval-Augmented Generation) platform for intelligent candidate discovery. This system moves beyond simple keyword matching to understand recruitment intent, leveraging a multi-agent pipeline to search, rank, and explain candidate matches with high precision.
 
-## Architecture
+---
 
+## 🚀 Key Features
+
+### 🧠 Agentic Search Pipeline
+*   **Intent Understanding**: Uses GPT-4o via LangGraph to parse unstructured queries (e.g., "Senior Python dev with 5y exp in fintech") into structured search intent (`MissionSpec`).
+*   **Hybrid Retrieval**: Combines **Dense Vector Search** (semantic meaning) and **Sparse Keyword Search** (BM25) using **Reciprocal Rank Fusion (RRF)** for best-of-both-world recall.
+*   **Cross-Encoder Reranking**: Re-scores top candidates using a Cross-Encoder model (`ms-marco-MiniLM-L-6-v2`) to filter out false positives and ensure high precision.
+*   **Evidence Extraction**: Agents automatically extract "proof snippets" from resumes to explain *why* a candidate matches.
+
+### 💻 Professional Research Interface
+*   **GPT-Style UX**: Modern 3-panel layout with specific "Mission Control" features for recruiters.
+*   **Persistent Sessions**: Search sessions are saved to MongoDB, allowing users to return to previous searches, view history, and resume analysis.
+*   **Real-time Agent transparency**: "Glass box" UI shows the agent's thought process, tool calls, and stage progression in real-time via Server-Sent Events (SSE).
+*   **Weak Match Fallback**: Intelligent handling of low-confidence results with clear UI signaling.
+
+### 🏗️ Enterprise-Grade Architecture
+*   **Microservices**: Decoupled Node.js API Gateway (auth/sessions) and Python ML Service (heavy lifting).
+*   **Dockerized**: Fully containerized setup for consistent deployment.
+*   **Privacy-First**: PII (Personally Identifiable Information) is redacted during ingestion to prevent model leakage.
+
+---
+
+## 🏗️ Architecture
+
+```mermaid
+graph TD
+    Client[React Client (Vite)] <-->|REST / SSE| Node[Node.js API Gateway]
+    Node <-->|Internal API| Python[Python ML Service (FastAPI)]
+    
+    subgraph "Agentic Pipeline (LangGraph)"
+        start((Start)) --> Intent[Query Analysis Agent]
+        Intent --> Retrieval[Hybrid Retrieval Tool]
+        Retrieval --> Rerank[Cross-Encoder Reranker]
+        Rerank --> Evidence[Evidence Extraction]
+        Evidence --> Assembly[Final Assembly]
+    end
+    
+    Python -->|Orchestrates| Agentic Pipeline
+    
+    Retrieval <-->|Vector Search| Mongo[MongoDB (Atlas/Local)]
+    Node <-->|Session Store| Mongo
 ```
-┌─────────────┐     ┌──────────────┐     ┌──────────────┐
-│  React UI   │────▶│  Express API │────▶│  MongoDB     │
-│  (Vite)     │     │  (Node)      │     │  (Local)     │
-│  :5173      │     │  :3001       │     │  :27017      │
-└─────────────┘     └──────┬───────┘     └──────────────┘
-                           │
-                    ┌──────▼───────┐
-                    │ ML Service   │
-                    │ (FastAPI)    │
-                    │ :8000        │
-                    └──────────────┘
-```
 
-## System Flow
+---
 
-### 1. Ingestion Pipeline (`ingestion/ingest.py`)
-The ingestion process transforms raw resume data into searchable artifacts.
+## 🤖 The Agentic Pipeline (Deep Dive)
 
-1.  **Read & ID**: Reads `master_resumes.jsonl`. Generates a deterministic `resumeId` based on the MD5 hash of the email (if present) or the resume content.
-2.  **PII Extraction** (`pii_handler.py`):
-    *   Extracts specific fields: name, email, phone, LinkedIn/GitHub URLs, and address.
-    *   Stores them in a separate `resumes_pii` collection.
-    *   **Redaction**: Uses Regex patterns to replace these entities with `[REDACTED]` in the searchable text to prevent PII leakage into embeddings.
-3.  **Skill Extraction** (`skill_extractor.py`):
-    *   Maps raw text to canonical skills (e.g., "React.js" -> "React").
-    *   **Confidence Scoring**: Assigns weights based on source:
-        *   **1.0**: Structured fields (Skills section, Technical Environment).
-        *   **0.9**: Project technologies.
-        *   **0.6**: Narrative text (Descriptions, Responsibilities).
-    *   Stored in the `resume_skills` ledger for fast filtering.
-4.  **Chunking** (`chunker.py`):
-    *   Splits resume text into semantic sections rather than arbitrary token windows.
-    *   **Sections**: Summary, Experience (one chunk per role), Projects (one chunk per project), Education (one chunk per degree), and Skills.
-    *   Preserves context like "Responsibilities" and "Dates" within each chunk.
-5.  **Embedding**: Generates vector embeddings for each chunk using `sentence-transformers/all-MiniLM-L6-v2`.
-6.  **Storage**: Saves user-agnostic chunks + embeddings to `resume_chunks`.
+The core of the system is a **LangGraph** state machine that orchestrates the search process:
 
-### 2. Search Pipeline (`server/src/services/searchService.js`)
-When a user searches for candidates:
+1.  **Stage 1: Intent Analysis** (`jd_agent.py`)
+    *   **Model**: OpenAI GPT-4o-mini
+    *   **Goal**: Converts natural language into a `MissionSpec` JSON object containing:
+        *   `keywords`: Mandatory technical skills.
+        *   `experience_level`: Years of experience required.
+        *   `domain`: Core domain (e.g., "Full Stack", "Data Science").
+        *   `constraints`: Location, education, etc.
 
-1.  **Query Analysis**: User input is split into distinct skill terms (e.g., "Python", "Machine Learning").
-2.  **Candidate Gating**:
-    *   Finds all resumes that possess the required skills using the `resume_skills` ledger.
-    *   **Logic**: `Count(Matched Skills) >= Threshold`.
-    *   This excludes irrelevant candidates *before* expensive vector search.
-3.  **Hybrid Retrieval**:
-    *   **Lexical Search**: Regex-based keyword matching on chunk text. Scores based on term frequency.
-    *   **Vector Search**: Computes Cosine Similarity between the query embedding and chunk embeddings (fetched from ML Service).
-4.  **Rank Fusion (RRF)**:
-    *   Combines the two ranked lists using Reciprocal Rank Fusion.
-    *   **Formula**: `Score = 1 / (k + rank_lexical) + 1 / (k + rank_vector)` with `k=60`.
-    *   Evidence is collected from the top-scoring chunks for each candidate.
-5.  **Scoring**:
-    Computes a normalized `finalScore` (0-100) for the UI:
-    *   **Skill Score (50%)**: `(Matched Skills / Total Query Skills) * 50`
-    *   **Semantic Score (50%)**: `Min(RRF_Score * 1500, 50)`
-    *   **Final Score**: `Skill Score + Semantic Score`
-6.  **Evidence**: Returns the top 3 matching snippets per candidate to explain *why* they matched.
+2.  **Stage 2: Hybrid Retrieval** (`retriever.py`)
+    *   **Dense Search**: Embeds the query using `sentence-transformers/all-MiniLM-L6-v2` and finds nearest neighbors in the resume vector space.
+    *   **Sparse Search**: Uses keyword matching (MongoDB text search/regex) to find specific hard skills.
+    *   **Fusion**: Merges lists using **RRF (Reciprocal Rank Fusion)**, giving higher weight to candidates that appear in both streams.
 
-## Quick Start
+3.  **Stage 3: Information Gain (Reranking)** (`reranker.py`)
+    *   **Model**: `cross-encoder/ms-marco-MiniLM-L-6-v2`
+    *   **Action**: Takes the top ~50 pairs of (Query, Resume Chunk) and predicts a relevance score (0-1).
+    *   **Benefit**: Cross-encoders are computationally expensive but strictly more accurate than bi-encoders (vectors) because they attend to the query and document simultaneously.
+
+4.  **Stage 4: Evidence & Assembly** (`assembly.py`)
+    *   **Action**: Selects the highest-scoring text chunks for each candidate.
+    *   **Fallback**: If strict filtering removes all candidates, the agent automatically triggers a "Weak Match" fallback mode, returning top candidates with a warning flag (`match_quality="weak"`), ensuring the user isn't left with an empty screen.
+
+---
+
+## 🛠️ Technology Stack
+
+### Frontend
+*   **Framework**: React 18 + Vite
+*   **State Management**: React Hooks + Context API
+*   **Styling**: Custom CSS variables (Glassmorphism design system)
+*   **Streaming**: `fetch-event-source` for real-time agent events
+
+### Backend (API Gateway)
+*   **Runtime**: Node.js 18 + Express
+*   **Database**: Mongoose (ODM)
+*   **Features**: Session management, CRUD operations, Proxy to ML service
+
+### ML Service
+*   **Runtime**: Python 3.10 + FastAPI
+*   **Orchestration**: LangChain + LangGraph
+*   **LLM**: OpenAI (GPT-3.5/4o)
+*   **Vector Models**: `sentence-transformers`, `HuggingFace`
+*   **Server**: Uvicorn
+
+### Data & Infrastructure
+*   **Database**: MongoDB (stores Vectors + Metadata + Sessions)
+*   **Containerization**: Docker & Docker Compose
+
+---
+
+## 🚀 Getting Started
 
 ### Prerequisites
-- Node.js 18+
-- Python 3.10+
-- MongoDB (local or Atlas)
+*   Docker & Docker Compose installed.
+*   OpenAI API Key.
+*   MongoDB Instance (Local or Atlas URI).
 
-### 1. Configure MongoDB
-- Open `.env` and replace `<db_password>` with your Atlas password.
-- Verify the `MONGO_URI` matches your cluster.
+### 1. Environment Setup
+Create a `.env` file in the root directory:
 
-### 2. Run Ingestion (one-time)
+```ini
+# Core
+OPENAI_API_KEY=sk-...
+MONGO_URI=mongodb://mongo:27017  # or your Atlas URI
+
+# ML Service Config
+OPENAI_MODEL=gpt-4o-mini
+EMBEDDING_MODEL_NAME=all-MiniLM-L6-v2
+RERANK_MODEL_NAME=cross-encoder/ms-marco-MiniLM-L-6-v2
+
+# Pipeline Tunables
+K_DENSE=300
+K_SPARSE=300
+MIN_RELEVANCE_SCORE=20
+```
+
+### 2. Run with Docker Compose
+The easiest way to start the entire capabilities stack:
+
 ```bash
-cd ingestion
-pip install -r requirements.txt
-python ingest.py
+docker-compose up --build
 ```
-This processes all 4,607 resumes: extracts PII, builds skills ledger, generates chunks, computes embeddings, and writes everything to MongoDB.
+This starts:
+*   `mongo` (Database)
+*   `ml-service` (Python Agent API @ port 8000)
+*   `server` (Node.js API @ port 5000)
+*   `client` (React App @ port 3000)
 
-### 3. Start ML Service
-```bash
-cd ml-service
-pip install -r requirements.txt
-uvicorn app.main:app --host 0.0.0.0 --port 8000
-```
+### 3. Verification
+Visit **http://localhost:3000**.
+1.  Click **"🤖 AI Agent Search"**.
+2.  Type a query: *"Senior Frontend Engineer with React and TypeScript, at least 5 years experience, preferably in London."*
+3.  Watch the agents break down the request, search the database, rerank results, and present a shortlist.
 
-### 4. Start API Server
-```bash
-cd server
-npm install
-npm run dev
-```
+---
 
-### 5. Start Frontend
-```bash
-cd client
-npm install
-npm run dev
-```
+## 📚 Data Ingestion (Optional)
+If you need to ingest new resumes:
 
-Visit [http://localhost:5173](http://localhost:5173)
+1.  Place raw JSON/PDF data in `ingestion/data/`.
+2.  Run the ingestion script:
+    ```bash
+    cd ingestion
+    pip install -r requirements.txt
+    python ingest.py
+    ```
+    This script handles:
+    *   **PII Redaction**: Removes names/emails before embedding.
+    *   **Chunking**: Splits resumes into semantic sections (Experience, Skills, Summary).
+    *   **Vectorization**: Creates embeddings for each chunk.
 
-## Search Features
+---
 
-- **Skill chip input** — comma or enter separated, paste support
-- **Match modes** — Match ALL or Match at least N of K
-- **Hybrid retrieval** — Lexical + Vector search with RRF fusion
-- **Explainable results** — Evidence snippets + matched skills for each candidate
-- **PII minimization** — No personal data in search surface or embeddings
+## 🔒 Security & Performance
+*   **PII Safety**: Resume text is scanned for patterns (email, phone) and redacted before embedding.
+*   **Optimization**: 
+    *   `node_modules` cached in Docker volumes.
+    *   ML models downloaded once and cached to `ai-models` volume.
+    *   React build optimized with Vite.
 
-## Project Structure
+---
 
-```
-resume-search/
-├── client/          # React (Vite) frontend
-├── server/          # Node/Express API
-├── ml-service/      # Python FastAPI embedding + reranking
-├── ingestion/       # Python data pipeline
-└── scripts/         # Index creation utilities
-```
-
-## API Endpoints
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | `/api/search` | Search resumes by skills |
-| GET | `/api/resume/:id` | Get candidate profile |
-| POST | `/api/admin/ingest` | Ingestion instructions |
-| GET | `/api/health` | Server health check |
-| POST | `/embed` | Get embeddings (ML) |
-| POST | `/rerank` | Rerank results (ML) |
-| GET | `/health` | ML service health |
+*Built with ❤️ by the Agentic AI Team.*

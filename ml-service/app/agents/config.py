@@ -34,6 +34,11 @@ K_RERANK = int(os.getenv("K_RERANK", "100"))
 W_RRF = float(os.getenv("W_RRF", "0.35"))
 W_CE = float(os.getenv("W_CE", "0.65"))
 
+# --- Hard filtering ---
+MIN_RELEVANCE_SCORE = float(os.getenv("MIN_RELEVANCE_SCORE", "20"))  # Minimum % to include in results
+HARD_FILTER_ENABLED = os.getenv("HARD_FILTER_ENABLED", "true").lower() in ("true", "1", "yes")
+MAX_RESULTS = int(os.getenv("MAX_RESULTS", "25"))
+
 # --- MongoDB ---
 MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
 MONGO_DB = os.getenv("MONGO_DB", "resume_search")

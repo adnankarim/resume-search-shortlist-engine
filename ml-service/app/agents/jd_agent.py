@@ -17,22 +17,25 @@ log = logging.getLogger(__name__)
 SYSTEM_PROMPT = """You are a recruitment query analyst. Your job is to parse a recruiter's search query or job description into structured requirements.
 
 Given the user's query, you MUST extract:
-1. **must_have**: Skills, technologies, or qualifications that are explicitly required. Be specific. Normalize technology names (e.g., "React.js" → "react", "Node" → "nodejs").
-2. **nice_to_have**: Skills mentioned as preferred, bonus, or optional.
-3. **negative_constraints**: Technologies, roles, or domains explicitly excluded (look for "not", "except", "excluding", "no").
-4. **min_years**: Minimum years of experience if mentioned (extract the number only).
-5. **location**: Preferred location if mentioned.
-6. **clarifications**: Anything ambiguous or missing that the recruiter might want to specify. Keep these concise.
+1. **core_domain**: The primary professional domain or job family. This should be a short phrase like "digital marketing", "python development", "data engineering", "frontend development", "devops". This is the CORE expertise area, not individual skills.
+2. **must_have**: Skills, technologies, or qualifications that are explicitly required. Be specific. Normalize technology names (e.g., "React.js" → "react", "Node" → "nodejs").
+3. **nice_to_have**: Skills mentioned as preferred, bonus, or optional.
+4. **negative_constraints**: Technologies, roles, or domains explicitly excluded (look for "not", "except", "excluding", "no").
+5. **min_years**: Minimum years of experience if mentioned (extract the number only).
+6. **location**: Preferred location if mentioned.
+7. **clarifications**: Anything ambiguous or missing that the recruiter might want to specify. Keep these concise.
 
 IMPORTANT RULES:
 - Extract ACTUAL skill names, not generic descriptions. "experience with databases" → "databases"
 - Normalize common aliases: "JS" → "javascript", "ML" → "machine learning", "k8s" → "kubernetes"
 - If the query is just a list of skills, put them all in must_have.
 - Keep everything lowercase.
+- core_domain MUST be provided — infer it from the overall query context.
 - Return valid JSON matching the schema exactly.
 
 You must respond with a JSON object matching this schema:
 {
+    "core_domain": "the primary professional domain",
     "must_have": ["skill1", "skill2"],
     "nice_to_have": ["skill3"],
     "negative_constraints": ["excluded1"],
@@ -91,6 +94,7 @@ async def jd_agent_node(state: AgentState, writer):
         
         parsed = json.loads(content.strip())
         mission_spec = MissionSpec(
+            core_domain=parsed.get("core_domain", ""),
             must_have=parsed.get("must_have", []),
             nice_to_have=parsed.get("nice_to_have", []),
             negative_constraints=parsed.get("negative_constraints", []),
