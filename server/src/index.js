@@ -10,6 +10,7 @@ require("dotenv").config({ path: path.join(__dirname, "../../.env") });
 const searchRoutes = require("./routes/search");
 const resumeRoutes = require("./routes/resume");
 const adminRoutes = require("./routes/admin");
+const shortlistRoutes = require("./routes/shortlist");
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -25,6 +26,7 @@ app.use(morgan("dev"));
 app.use("/api/search", searchRoutes);
 app.use("/api/resume", resumeRoutes);
 app.use("/api/admin", adminRoutes);
+app.use("/api/shortlist", shortlistRoutes);
 
 // Health check
 app.get("/api/health", (req, res) => {

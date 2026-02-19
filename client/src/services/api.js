@@ -31,3 +31,44 @@ export async function deleteResume(resumeId) {
     if (!res.ok) throw new Error(`Failed to delete resume: ${res.statusText}`);
     return res.json();
 }
+
+/**
+ * Shortlist V2 — streams agentic pipeline events via SSE.
+ * @param {Object} params
+ * @param {string} params.queryText - Free-text query or JD
+ * @param {Object} params.filters - Optional filters
+ * @param {Function} params.onEvent - Callback for each SSE event: (eventType, data) => void
+ * @param {Function} params.onError - Callback for errors
+ * @param {Function} params.onDone - Callback when stream ends
+ * @returns {AbortController} controller to cancel the stream
+ */
+export function fetchShortlistV2({ queryText, filters, onEvent, onError, onDone }) {
+    const controller = new AbortController();
+
+    import('@microsoft/fetch-event-source').then(({ fetchEventSource }) => {
+        fetchEventSource(`${API_BASE}/shortlist`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ query_text: queryText, filters: filters || {} }),
+            signal: controller.signal,
+            onmessage(ev) {
+                try {
+                    const data = JSON.parse(ev.data);
+                    onEvent?.(ev.event || 'update', data);
+                } catch (e) {
+                    // Non-JSON event, pass raw
+                    onEvent?.(ev.event || 'update', { message: ev.data });
+                }
+            },
+            onerror(err) {
+                onError?.(err);
+            },
+            onclose() {
+                onDone?.();
+            },
+            openWhenHidden: true,
+        });
+    });
+
+    return controller;
+}
